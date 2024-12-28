@@ -369,14 +369,80 @@ class Risk(BaseModel):
         
         client.command(create_table_query)
 
+    @classmethod
+    def generate_random_risks_from_trades_df(cls, trades_df: pl.DataFrame, num_risks_per_trade: int = 1) -> pl.DataFrame:
+        """
+        Generates random risk records based on existing trades.
+        """
+        fake = Faker()
+        
+        # Get the base trade records
+        trade_records = trades_df.select([
+            'id', 'tradeId', 'counterParty', 'collatId', 'collatDesc'
+        ])
+        
+        # Repeat the trade records
+        trade_records = pl.concat([trade_records] * num_risks_per_trade, how="vertical")
+        
+        num_records = len(trade_records)
+        base_date = datetime.now()
+        
+        # Convert numeric values to strings where the schema expects strings
+        data = {
+            'jobId': [fake.uuid4() for _ in range(num_records)],
+            'asOfDate': [base_date - timedelta(minutes=random.randint(0, 60)) for _ in range(num_records)],
+            'snapId': [f"RISK:{base_date.strftime('%Y%m%d')}" for _ in range(num_records)],
+            'id': trade_records['id'],
+            'tradeId': trade_records['tradeId'],
+            'counterParty': trade_records['counterParty'],
+            'collatId': trade_records['collatId'],
+            'collatDesc': trade_records['collatDesc'],
+            'collatConcentration': [float(round(random.uniform(0, 1), 4)) for _ in range(num_records)],  # Convert to float
+            'collatName': [f"Collateral_{i}" for i in range(num_records)],
+            'collatTicker': [f"TICK_{fake.random_number(digits=4)}" for _ in range(num_records)],
+            'collatIssuer': [f"ISSUER_{fake.random_number(digits=4)}" for _ in range(num_records)],
+            'outstandingAmt': [Decimal(str(round(random.uniform(1000000, 50000000), 2))) for _ in range(num_records)],
+            'dtm': [f"{random.randint(1, 365)}D" for _ in range(num_records)],
+            'age': [f"{random.randint(1, 100)}D" for _ in range(num_records)],
+            'tenor': [f"{random.randint(1, 10)}Y" for _ in range(num_records)],
+            'fxSpot': [float(round(random.uniform(0.8, 1.2), 6)) for _ in range(num_records)],  # Convert to float
+            'fxSpotFunding': [float(round(random.uniform(0.8, 1.2), 6)) for _ in range(num_records)],  # Convert to float
+            'fxSpotEOD': [float(round(random.uniform(0.8, 1.2), 6)) for _ in range(num_records)],  # Convert to float
+            'fundingAmount': [Decimal(str(round(random.uniform(1000000, 50000000), 2))) for _ in range(num_records)],
+            'collateralAmount': [Decimal(str(round(random.uniform(1000000, 50000000), 2))) for _ in range(num_records)],
+            'cashOut': [Decimal(str(round(random.uniform(-1000000, 1000000), 2))) for _ in range(num_records)],
+            'accrualDaily': [Decimal(str(round(random.uniform(0, 10000), 2))) for _ in range(num_records)],
+            'accrualProjected': [Decimal(str(round(random.uniform(0, 100000), 2))) for _ in range(num_records)],
+            'accrualRealised': [Decimal(str(round(random.uniform(0, 50000), 2))) for _ in range(num_records)],
+            'pxEOD': [Decimal(str(round(random.uniform(0.8, 1.2), 6))) for _ in range(num_records)],
+            'pxLast': [float(round(random.uniform(0.8, 1.2), 6)) for _ in range(num_records)],  # Convert to float
+            'realizedMarginCall': [float(round(random.uniform(-100000, 100000), 2)) for _ in range(num_records)],  # Convert to float
+            'expectedMarginCall': [float(round(random.uniform(-100000, 100000), 2)) for _ in range(num_records)],  # Convert to float
+            'financingExposure': [float(round(random.uniform(-1000000, 1000000), 2)) for _ in range(num_records)],  # Convert to float
+            'calculatedAt': [base_date - timedelta(minutes=random.randint(0, 60)) for _ in range(num_records)]
+        }
+        
+        schema = {field_name: get_polars_type(field.annotation) 
+                 for field_name, field in cls.model_fields.items()}
+        return pl.DataFrame(data, schema=schema,strict=False)
 
+    @classmethod
+    def save_to_clickhouse(cls, df: pl.DataFrame, client: Client, table_name: str='risk_f', database: str = "default") -> None:
+        df = df.to_arrow()
+        client.insert_arrow(f"{database}.{table_name}", df)
+        
 
 # Example usage:
 if __name__ == "__main__":
     client = get_client(host='localhost', port=8123, username='default', password='')
-    # Trade.create_clickhouse_table(client, drop_existing=True)
-    # df = Trade.generate_random_trades_df(10)
-    # Trade.save_to_clickhouse(df, client, table_name='trades_f', database='default')
-
+    Trade.create_clickhouse_table(client, drop_existing=True)
     Risk.create_clickhouse_table(client, drop_existing=True)
-    # print(df.glimpse())
+
+    trades_df = Trade.generate_random_trades_df(10)
+    Trade.save_to_clickhouse(trades_df, client, table_name='trades_f', database='default')
+    
+    risks_df = Risk.generate_random_risks_from_trades_df(trades_df)
+    Risk.save_to_clickhouse(risks_df, client, table_name='risk_f', database='default')
+
+    print(risks_df.glimpse())
+    
