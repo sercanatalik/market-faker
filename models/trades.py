@@ -17,6 +17,12 @@ PYTHON_TO_CLICKHOUSE_TYPE_MAP = {
     date: "Date",
     datetime: "DateTime",
     Decimal: "Decimal(38, 18)",
+    Optional[float]: "Nullable(Float64)",
+    Optional[int]: "Nullable(Int64)",
+    Optional[str]: "Nullable(String)",
+    Optional[date]: "Nullable(Date)",
+    Optional[datetime]: "Nullable(DateTime)",
+    Optional[Decimal]: "Nullable(Decimal(38, 18))"
 }
 
 PYTHON_TO_POLARS_TYPE_MAP = {
@@ -33,9 +39,20 @@ def get_clickhouse_type(python_type: Type) -> str:
     origin = get_origin(python_type)
     if origin is Optional:
         base_type = get_args(python_type)[0]
+        print(base_type)
         if base_type is Decimal:
             return "Nullable(Decimal(38, 18))"
-        return f"Nullable({PYTHON_TO_CLICKHOUSE_TYPE_MAP.get(base_type, 'String')})"
+        elif base_type is date:
+            return "Nullable(Date)"
+        elif base_type is datetime:
+            return "Nullable(DateTime)"
+        elif base_type is str:
+            return "Nullable(String)"
+        elif base_type is int:
+            return "Nullable(Int64)"
+        elif base_type is float:
+            return "Nullable(Float64)"
+    
     return PYTHON_TO_CLICKHOUSE_TYPE_MAP.get(python_type, "String")
 
 def get_polars_type(python_type: Type) -> pl.DataType:
@@ -48,38 +65,6 @@ def get_polars_type(python_type: Type) -> pl.DataType:
     return PYTHON_TO_POLARS_TYPE_MAP.get(python_type, pl.Utf8)
 
 
-class Risk(BaseModel):
-    jobId: Optional[str]
-    asOfDate: datetime
-    snapId: Optional[str]
-    id: int
-    tradeId: Optional[str]
-    counterParty: Optional[str]
-    collatId: Optional[str]
-    collatDesc: Optional[str]
-    collatConcentration: Optional[float]
-    collatName: Optional[str]
-    collatTicker: Optional[str]
-    collatIssuer: Optional[str]
-    outstandingAmt: Optional[Decimal] = Field(max_digits=38, decimal_places=18)
-    dtm: Optional[str]
-    age: Optional[str]
-    tenor: Optional[str]
-    fxSpot: Optional[float]
-    fxSpotFunding: Optional[float]
-    fxSpotEOD: Optional[float]
-    fundingAmount: Optional[Decimal] = Field(max_digits=38, decimal_places=18)
-    collateralAmount: Optional[Decimal] = Field(max_digits=38, decimal_places=18)
-    cashOut: Optional[Decimal] = Field(max_digits=38, decimal_places=18)
-    accrualDaily: Optional[Decimal] = Field(max_digits=38, decimal_places=18)
-    accrualProjected: Optional[Decimal] = Field(max_digits=38, decimal_places=18)
-    accrualRealised: Optional[Decimal] = Field(max_digits=38, decimal_places=18)
-    pxEOD: Optional[Decimal] = Field(max_digits=38, decimal_places=18)
-    pxLast: Optional[float]
-    realizedMarginCall: Optional[float]
-    expectedMarginCall: Optional[float]
-    financingExposure: Optional[float]
-    calculatedAt: datetime
 
 
 
@@ -306,12 +291,92 @@ class Trade(BaseModel):
         df = df.to_arrow()
         client.insert_arrow(f"{database}.{table_name}", df)
 
+
+
+
+class Risk(BaseModel):
+    jobId: Optional[str]
+    asOfDate: datetime
+    snapId: Optional[str]
+    id: int
+    tradeId: Optional[str]
+    counterParty: Optional[str]
+    collatId: Optional[str]
+    collatDesc: Optional[str]
+    collatConcentration: Optional[float]
+    collatName: Optional[str]
+    collatTicker: Optional[str]
+    collatIssuer: Optional[str]
+    outstandingAmt: Optional[Decimal] = Field(max_digits=38, decimal_places=18)
+    dtm: Optional[str]
+    age: Optional[str]
+    tenor: Optional[str]
+    fxSpot: Optional[float]
+    fxSpotFunding: Optional[float]
+    fxSpotEOD: Optional[float]
+    fundingAmount: Optional[Decimal] = Field(max_digits=38, decimal_places=18)
+    collateralAmount: Optional[Decimal] = Field(max_digits=38, decimal_places=18)
+    cashOut: Optional[Decimal] = Field(max_digits=38, decimal_places=18)
+    accrualDaily: Optional[Decimal] = Field(max_digits=38, decimal_places=18)
+    accrualProjected: Optional[Decimal] = Field(max_digits=38, decimal_places=18)
+    accrualRealised: Optional[Decimal] = Field(max_digits=38, decimal_places=18)
+    pxEOD: Optional[Decimal] = Field(max_digits=38, decimal_places=18)
+    pxLast: Optional[float]
+    realizedMarginCall: Optional[float]
+    expectedMarginCall: Optional[float]
+    financingExposure: Optional[float]
+    calculatedAt: datetime
+
+    @classmethod
+    def create_clickhouse_table(cls, client: Client, table_name: str='risk_f', database: str = "default", drop_existing: bool = True,
+                              order_by: tuple = ("asOfDate", "id")) -> None:
+        """
+        Dynamically creates a ClickHouse table based on the Pydantic model fields.
+        
+        Args:
+            client: ClickHouse client instance
+            table_name: Name of the table to create
+            database: Database name (defaults to 'default')
+            order_by: Tuple of field names to use for ordering (defaults to ("asOfDate", "id"))
+        """
+        # First drop the existing table if it exists
+        if drop_existing:
+            drop_table_query = f"DROP TABLE IF EXISTS {database}.{table_name}"
+            client.command(drop_table_query)
+        
+        # Get model fields and their types
+        field_definitions = []
+        for field_name, field in cls.model_fields.items():
+            # Get the field type
+            field_type = field.annotation
+            clickhouse_type = get_clickhouse_type(field_type)
+            print(field_type, clickhouse_type)
+            field_definitions.append(f"{field_name} {clickhouse_type}")
+        
+        # Join field definitions with commas
+        fields_sql = ",\n    ".join(field_definitions)
+        
+        # Create the ORDER BY clause
+        order_by_clause = ", ".join(order_by)
+        
+        # Construct the complete CREATE TABLE query
+        create_table_query = f"""
+        CREATE TABLE IF NOT EXISTS {database}.{table_name} (
+            {fields_sql}
+        ) ENGINE = ReplacingMergeTree(calculatedAt)
+        ORDER BY ({order_by_clause});
+        """
+        
+        client.command(create_table_query)
+
+
+
 # Example usage:
 if __name__ == "__main__":
     client = get_client(host='localhost', port=8123, username='default', password='')
-    Trade.create_clickhouse_table(client, drop_existing=True)
-    df = Trade.generate_random_trades_df(10)
-    Trade.save_to_clickhouse(df, client, table_name='trades_f', database='default')
+    # Trade.create_clickhouse_table(client, drop_existing=True)
+    # df = Trade.generate_random_trades_df(10)
+    # Trade.save_to_clickhouse(df, client, table_name='trades_f', database='default')
 
-    
-    print(df.glimpse())
+    Risk.create_clickhouse_table(client, drop_existing=True)
+    # print(df.glimpse())
