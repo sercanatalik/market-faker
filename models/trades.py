@@ -430,19 +430,167 @@ class Risk(BaseModel):
     def save_to_clickhouse(cls, df: pl.DataFrame, client: Client, table_name: str='risk_f', database: str = "default") -> None:
         df = df.to_arrow()
         client.insert_arrow(f"{database}.{table_name}", df)
+
+
+class Counterparty(BaseModel):
+    counterParty: str
+    name: Optional[str] = None
+    shortName: Optional[str] = None
+    type: Optional[str] = None
+    region: Optional[str] = None
+    country: Optional[str] = None
+    sector: Optional[str] = None
+    industry: Optional[str] = None
+    rating: Optional[str] = None
+    ratingAgency: Optional[str] = None
+    lei: Optional[str] = None
+    status: Optional[str] = None
+    updatedAt: datetime
+   
+    @classmethod
+    def create_clickhouse_table(cls, client: Client, table_name: str='counterparty_f', database: str = "default", 
+                              drop_existing: bool = True, order_by: tuple = ("counterParty")) -> None:
+        if drop_existing:
+            drop_table_query = f"DROP TABLE IF EXISTS {database}.{table_name}"
+            client.command(drop_table_query)
         
+        field_definitions = []
+        for field_name, field in cls.model_fields.items():
+            field_type = field.annotation
+            clickhouse_type = get_clickhouse_type(field_type)
+            field_definitions.append(f"{field_name} {clickhouse_type}")
+        
+        fields_sql = ",\n    ".join(field_definitions)
+        order_by_clause = ", ".join(order_by)
+        
+        create_table_query = f"""
+        CREATE TABLE IF NOT EXISTS {database}.{table_name} (
+            {fields_sql}
+        ) ENGINE = ReplacingMergeTree(updatedAt)
+        ORDER BY ({order_by_clause});
+        """
+        
+        client.command(create_table_query)
+
+    @classmethod
+    def generate_random_counterparties_df(cls, num_records: int = 10) -> pl.DataFrame:
+        fake = Faker()
+        
+        # Define realistic values for specific fields
+        types = ['BANK', 'HEDGE_FUND', 'ASSET_MANAGER', 'BROKER', 'CORPORATE']
+        regions = ['EMEA', 'APAC', 'AMER']
+        sectors = ['FINANCIAL', 'TECHNOLOGY', 'ENERGY', 'HEALTHCARE', 'INDUSTRIAL']
+        industries = ['BANKING', 'SOFTWARE', 'OIL_AND_GAS', 'PHARMACEUTICALS', 'MANUFACTURING']
+        ratings = ['AAA', 'AA+', 'AA', 'AA-', 'A+', 'A', 'A-', 'BBB+', 'BBB', 'BBB-']
+        rating_agencies = ['SP', 'MOODYS', 'FITCH']
+        statuses = ['ACTIVE', 'INACTIVE', 'PENDING', 'SUSPENDED']
+        
+        base_date = date.today()
+        now = datetime.now()
+        
+        data = {
+            'counterParty': [f"CP{fake.unique.random_number(digits=6)}" for _ in range(num_records)],
+            'name': [fake.company() for _ in range(num_records)],
+            'shortName': [f"CP_{fake.random_number(digits=4)}" for _ in range(num_records)],
+            'type': [random.choice(types) for _ in range(num_records)],
+            'region': [random.choice(regions) for _ in range(num_records)],
+            'country': [fake.country_code() for _ in range(num_records)],
+            'sector': [random.choice(sectors) for _ in range(num_records)],
+            'industry': [random.choice(industries) for _ in range(num_records)],
+            'rating': [random.choice(ratings) for _ in range(num_records)],
+            'ratingAgency': [random.choice(rating_agencies) for _ in range(num_records)],
+            'lei': [fake.uuid4().replace('-', '').upper()[:20] for _ in range(num_records)],
+            'status': [random.choice(statuses) for _ in range(num_records)],
+            'updatedAt': [now - timedelta(minutes=random.randint(0, 60)) for _ in range(num_records)]
+        }
+        
+        schema = {field_name: get_polars_type(field.annotation) 
+                 for field_name, field in cls.model_fields.items()}
+        return pl.DataFrame(data, schema=schema, strict=False)
+
+    @classmethod
+    def save_to_clickhouse(cls, df: pl.DataFrame, client: Client, table_name: str='counterparty_f', 
+                          database: str = "default") -> None:
+        df = df.to_arrow()
+        client.insert_arrow(f"{database}.{table_name}", df)
+    
+
+class Instrument(BaseModel):
+    id: str
+    type: Optional[str]
+    name: Optional[str]
+    description: Optional[str]
+    status: Optional[str]
+    updatedAt: datetime
+
+    @classmethod
+    def create_clickhouse_table(cls, client: Client, table_name: str='instrument_f', database: str = "default", 
+                              drop_existing: bool = True, order_by: tuple = ("id",)) -> None:
+        if drop_existing:
+            drop_table_query = f"DROP TABLE IF EXISTS {database}.{table_name}"
+            client.command(drop_table_query)
+        
+        field_definitions = []
+        for field_name, field in cls.model_fields.items():
+            field_type = field.annotation
+            clickhouse_type = get_clickhouse_type(field_type)
+            field_definitions.append(f"{field_name} {clickhouse_type}")
+        
+        fields_sql = ",\n    ".join(field_definitions)
+        order_by_clause = ", ".join(order_by)
+        
+        create_table_query = f"""
+        CREATE TABLE IF NOT EXISTS {database}.{table_name} (
+            {fields_sql}
+        ) ENGINE = ReplacingMergeTree(updatedAt)
+        ORDER BY ({order_by_clause});
+        """
+        
+        client.command(create_table_query)
+
+    @classmethod
+    def generate_random_instruments_df(cls, num_records: int = 10) -> pl.DataFrame:
+        fake = Faker()
+        
+        # Define realistic values for specific fields
+        types = ['BOND', 'EQUITY', 'FUTURE', 'OPTION', 'SWAP']
+        statuses = ['ACTIVE', 'INACTIVE', 'SUSPENDED']
+        now = datetime.now()
+        
+        data = {
+            'id': [f"INST_{fake.unique.random_number(digits=8)}" for _ in range(num_records)],
+            'type': [random.choice(types) for _ in range(num_records)],
+            'name': [f"{fake.company()} {random.choice(types)}" for _ in range(num_records)],
+            'description': [fake.text(max_nb_chars=100) for _ in range(num_records)],
+            'status': [random.choice(statuses) for _ in range(num_records)],
+            'updatedAt': [now - timedelta(minutes=random.randint(0, 60)) for _ in range(num_records)]
+        }
+        
+        schema = {field_name: get_polars_type(field.annotation) 
+                 for field_name, field in cls.model_fields.items()}
+        return pl.DataFrame(data, schema=schema, strict=False)
+
+    @classmethod
+    def save_to_clickhouse(cls, df: pl.DataFrame, client: Client, table_name: str='instrument_f', 
+                          database: str = "default") -> None:
+        df = df.to_arrow()
+        client.insert_arrow(f"{database}.{table_name}", df)
+
 
 # Example usage:
 if __name__ == "__main__":
     client = get_client(host='localhost', port=8123, username='default', password='')
     Trade.create_clickhouse_table(client, drop_existing=True)
     Risk.create_clickhouse_table(client, drop_existing=True)
-
+    Counterparty.create_clickhouse_table(client, drop_existing=True)
     trades_df = Trade.generate_random_trades_df(10)
     Trade.save_to_clickhouse(trades_df, client, table_name='trades_f', database='default')
     
     risks_df = Risk.generate_random_risks_from_trades_df(trades_df)
     Risk.save_to_clickhouse(risks_df, client, table_name='risk_f', database='default')
 
-    print(risks_df.glimpse())
+
+    counterparty_df = Counterparty.generate_random_counterparties_df(10)
+    
+    Counterparty.save_to_clickhouse(counterparty_df, client, table_name='counterparty_f', database='default')
     
