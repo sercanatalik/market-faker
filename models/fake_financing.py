@@ -603,10 +603,10 @@ if __name__ == "__main__":
     client = get_client(host='localhost', port=8123, username='default', password='')
     
     # Create tables first
-    Trade.create_clickhouse_table(client, drop_existing=True)
-    Risk.create_clickhouse_table(client, drop_existing=True)
-    Counterparty.create_clickhouse_table(client, drop_existing=True)
-    Instrument.create_clickhouse_table(client, drop_existing=True)
+    Trade.create_clickhouse_table(client, drop_existing=False)
+    Risk.create_clickhouse_table(client, drop_existing=False)
+    Counterparty.create_clickhouse_table(client, drop_existing=False)
+    Instrument.create_clickhouse_table(client, drop_existing=False)
    
     # Generate reference data
     counterparty_df = Counterparty.generate_random_counterparties_df(10)
@@ -616,7 +616,7 @@ if __name__ == "__main__":
     Instrument.save_to_clickhouse(instrument_df, client)
 
     # Generate trades using the reference data directly
-    trades_df = Trade.generate_random_trades_df(10, counterparty_df, instrument_df)
+    trades_df = Trade.generate_random_trades_df(100, counterparty_df, instrument_df)
     Trade.save_to_clickhouse(trades_df, client)
     
     risks_df = Risk.generate_random_risks_from_trades_df(trades_df)
