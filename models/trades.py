@@ -160,16 +160,23 @@ class Trade(BaseModel):
         
 
     @classmethod
-    def generate_random_trades_df(cls, num_records: int = 10) -> pl.DataFrame:
+    def generate_random_trades_df(cls, num_records: int = 10, counterparty_df: pl.DataFrame = None, instrument_df: pl.DataFrame = None) -> pl.DataFrame:
         """
         Generates random trade records and returns them as a Polars DataFrame.
+        Uses provided counterparty and instrument DataFrames for reference data.
         
         Args:
-            num_records: Number of records to generate (default: 10)
-            
-        Returns:
-            pl.DataFrame: Polars DataFrame containing the random trades
+            num_records: Number of trade records to generate
+            counterparty_df: Polars DataFrame containing counterparty reference data
+            instrument_df: Polars DataFrame containing instrument reference data
         """
+        # Convert reference data to lists for random selection
+        counterparty_list = counterparty_df['name'].to_list() if counterparty_df is not None else ['DEFAULT_CP']
+        instrument_pairs = list(zip(
+            instrument_df['id'].to_list(), 
+            instrument_df['name'].to_list()
+        )) if instrument_df is not None else [('DEFAULT_ID', 'DEFAULT_NAME')]
+        
         fake = Faker()
         
         # Define realistic values for specific fields
@@ -254,7 +261,13 @@ class Trade(BaseModel):
             data['maturityDt'].append(maturity_date.strftime('%Y-%m-%d'))
             data['maturityIsOpen'].append(str(random.choice([True, False])).lower())
             data['executionDt'].append(execution_time.strftime('%Y-%m-%d %H:%M:%S'))
-            data['counterParty'].append(f"CP{fake.random_number(digits=6)}")
+            
+            # Select random instrument
+            collat_id, collat_desc = random.choice(instrument_pairs)
+            
+            data['counterParty'].append(random.choice(counterparty_list))
+            data['collatId'].append(collat_id)
+            data['collatDesc'].append(collat_desc)
             data['treatsCode'].append(f"TC{fake.random_number(digits=6)}")
             data['traderName'].append(fake.last_name().upper())
             data['projectName'].append(None if random.random() < 0.7 else f"PROJ_{fake.random_number(digits=4)}")
@@ -264,8 +277,6 @@ class Trade(BaseModel):
             data['haircut'].append(round(random.uniform(0, 0.1), 4))
             data['collatCurrency'].append(random.choice(currencies))
             data['settlementCurrency'].append(random.choice(currencies))
-            data['collatId'].append(f"XS{fake.random_number(digits=10)}")
-            data['collatDesc'].append(f"XS{fake.random_number(digits=10)}")
             data['collatNotional'].append(Decimal(str(round(random.uniform(1000000, 50000000), 2))))
             data['collatType'].append(random.choice(collat_types))
             data['fundingLegType'].append(random.choice(funding_leg_types))
@@ -590,21 +601,23 @@ class Instrument(BaseModel):
 # Example usage:
 if __name__ == "__main__":
     client = get_client(host='localhost', port=8123, username='default', password='')
+    
+    # Create tables first
     Trade.create_clickhouse_table(client, drop_existing=True)
     Risk.create_clickhouse_table(client, drop_existing=True)
     Counterparty.create_clickhouse_table(client, drop_existing=True)
     Instrument.create_clickhouse_table(client, drop_existing=True)
-    trades_df = Trade.generate_random_trades_df(10)
-    Trade.save_to_clickhouse(trades_df, client, table_name='trades_f', database='default')
-    
-    risks_df = Risk.generate_random_risks_from_trades_df(trades_df)
-    Risk.save_to_clickhouse(risks_df, client, table_name='risk_f', database='default')
-
-
+   
+    # Generate reference data
     counterparty_df = Counterparty.generate_random_counterparties_df(10)
-    Counterparty.save_to_clickhouse(counterparty_df, client, table_name='counterparty_f', database='default')
+    Counterparty.save_to_clickhouse(counterparty_df, client)
 
     instrument_df = Instrument.generate_random_instruments_df(10)
-    Instrument.save_to_clickhouse(instrument_df, client, table_name='instrument_f', database='default')
+    Instrument.save_to_clickhouse(instrument_df, client)
 
-    print(instrument_df.glimpse())
+    # Generate trades using the reference data directly
+    trades_df = Trade.generate_random_trades_df(10, counterparty_df, instrument_df)
+    Trade.save_to_clickhouse(trades_df, client)
+    
+    risks_df = Risk.generate_random_risks_from_trades_df(trades_df)
+    Risk.save_to_clickhouse(risks_df, client)
