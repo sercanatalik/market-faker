@@ -433,8 +433,7 @@ class Risk(BaseModel):
 
 
 class Counterparty(BaseModel):
-    counterParty: str
-    name: Optional[str] = None
+    name: str 
     shortName: Optional[str] = None
     type: Optional[str] = None
     region: Optional[str] = None
@@ -449,19 +448,30 @@ class Counterparty(BaseModel):
    
     @classmethod
     def create_clickhouse_table(cls, client: Client, table_name: str='counterparty_f', database: str = "default", 
-                              drop_existing: bool = True, order_by: tuple = ("counterParty")) -> None:
+                              drop_existing: bool = True, order_by: tuple = ("name",)) -> None:
+        """
+        Creates a ClickHouse table for counterparty data.
+        
+        Args:
+            client: ClickHouse client instance
+            table_name: Name of the table to create
+            database: Database name
+            drop_existing: Whether to drop existing table
+            order_by: Tuple of field names to use for ordering
+        """
         if drop_existing:
             drop_table_query = f"DROP TABLE IF EXISTS {database}.{table_name}"
             client.command(drop_table_query)
         
+        # Get model fields and their types
         field_definitions = []
         for field_name, field in cls.model_fields.items():
             field_type = field.annotation
             clickhouse_type = get_clickhouse_type(field_type)
-            field_definitions.append(f"{field_name} {clickhouse_type}")
+            field_definitions.append(f"`{field_name}` {clickhouse_type}")
         
         fields_sql = ",\n    ".join(field_definitions)
-        order_by_clause = ", ".join(order_by)
+        order_by_clause = ", ".join(f"`{field}`" for field in order_by)
         
         create_table_query = f"""
         CREATE TABLE IF NOT EXISTS {database}.{table_name} (
@@ -489,7 +499,7 @@ class Counterparty(BaseModel):
         now = datetime.now()
         
         data = {
-            'counterParty': [f"CP{fake.unique.random_number(digits=6)}" for _ in range(num_records)],
+          
             'name': [fake.company() for _ in range(num_records)],
             'shortName': [f"CP_{fake.random_number(digits=4)}" for _ in range(num_records)],
             'type': [random.choice(types) for _ in range(num_records)],
@@ -583,6 +593,7 @@ if __name__ == "__main__":
     Trade.create_clickhouse_table(client, drop_existing=True)
     Risk.create_clickhouse_table(client, drop_existing=True)
     Counterparty.create_clickhouse_table(client, drop_existing=True)
+    Instrument.create_clickhouse_table(client, drop_existing=True)
     trades_df = Trade.generate_random_trades_df(10)
     Trade.save_to_clickhouse(trades_df, client, table_name='trades_f', database='default')
     
@@ -591,6 +602,9 @@ if __name__ == "__main__":
 
 
     counterparty_df = Counterparty.generate_random_counterparties_df(10)
-    
     Counterparty.save_to_clickhouse(counterparty_df, client, table_name='counterparty_f', database='default')
-    
+
+    instrument_df = Instrument.generate_random_instruments_df(10)
+    Instrument.save_to_clickhouse(instrument_df, client, table_name='instrument_f', database='default')
+
+    print(instrument_df.glimpse())
