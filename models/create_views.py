@@ -16,7 +16,7 @@ def create_risk_materialized_view(client: Client) -> None:
     
     create_view_query = """
         CREATE MATERIALIZED VIEW risk_f_mv
-        ENGINE = ReplacingMergeTree()
+        ENGINE = ReplacingMergeTree(calculatedAt)
         PRIMARY KEY (r.asOfDate, r.id)
         ORDER BY (r.asOfDate, r.id)
         AS
@@ -112,11 +112,17 @@ def create_risk_materialized_view(client: Client) -> None:
             i.name AS instrument_name,
             i.description AS instrument_description,
             i.status AS instrument_status,
-            i.updatedAt AS instrument_updatedAt
+            i.updatedAt AS instrument_updatedAt,
+
+            -- HMS Book fields
+            h.desk AS hmsbook_desk,
+            h.updatedAt AS hmsbook_updatedAt
+            
         FROM risk_f AS r
         LEFT JOIN trades_f AS t ON r.id = t.id
         LEFT JOIN counterparty_f AS cp ON r.counterParty = cp.name
         LEFT JOIN instrument_f AS i ON r.collatId = i.id
+        LEFT JOIN hmsbook_f AS h ON t.hmsBook = h.name
     """
 
     try:

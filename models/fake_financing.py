@@ -160,7 +160,7 @@ class Trade(BaseModel):
         
 
     @classmethod
-    def generate_random_trades_df(cls, num_records: int = 10, counterparty_df: pl.DataFrame = None, instrument_df: pl.DataFrame = None) -> pl.DataFrame:
+    def generate_random_trades_df(cls, num_records: int = 10, counterparty_df: pl.DataFrame = None, instrument_df: pl.DataFrame = None, books_df: pl.DataFrame = None) -> pl.DataFrame:
         """
         Generates random trade records and returns them as a Polars DataFrame.
         Uses provided counterparty and instrument DataFrames for reference data.
@@ -169,6 +169,7 @@ class Trade(BaseModel):
             num_records: Number of trade records to generate
             counterparty_df: Polars DataFrame containing counterparty reference data
             instrument_df: Polars DataFrame containing instrument reference data
+            books_df: Polars DataFrame containing books reference data
         """
         # Convert reference data to lists for random selection
         counterparty_list = counterparty_df['name'].to_list() if counterparty_df is not None else ['DEFAULT_CP']
@@ -176,7 +177,7 @@ class Trade(BaseModel):
             instrument_df['id'].to_list(), 
             instrument_df['name'].to_list()
         )) if instrument_df is not None else [('DEFAULT_ID', 'DEFAULT_NAME')]
-        
+        books_list = books_df['name'].to_list() if books_df is not None else ['DEFAULT_BOOK']
         fake = Faker()
         
         # Define realistic values for specific fields
@@ -184,7 +185,7 @@ class Trade(BaseModel):
         product_types = ['COLLATERAL', 'SWAP', 'FUTURE', 'OPTION']
         product_subtypes = ['CLR', 'STD', 'FWD']
         currencies = ['USD', 'EUR', 'GBP', 'JPY']
-        books = ['INTSTRREPO', 'EXTSTRREPO', 'EQTYREPO']
+        books = books_list  
         collat_types = ['EURABS', 'USABS', 'GOVTBOND']
         funding_leg_types = ['fixedRate', 'floatingRate']
         fx_pairs = ['USDEUR', 'USDJPY', 'EURGBP', 'EURUSD']
@@ -307,7 +308,7 @@ class Trade(BaseModel):
 
 class Risk(BaseModel):
     jobId: Optional[str]
-    asOfDate: datetime
+    asOfDate: date
     snapId: Optional[str]
     id: int
     tradeId: Optional[str]
@@ -396,12 +397,12 @@ class Risk(BaseModel):
         trade_records = pl.concat([trade_records] * num_risks_per_trade, how="vertical")
         
         num_records = len(trade_records)
-        base_date = datetime.now()
+        base_date = date.today()
         
         # Convert numeric values to strings where the schema expects strings
         data = {
             'jobId': [fake.uuid4() for _ in range(num_records)],
-            'asOfDate': [base_date - timedelta(minutes=random.randint(0, 60)) for _ in range(num_records)],
+            'asOfDate': [base_date for _ in range(num_records)],
             'snapId': [f"RISK:{base_date.strftime('%Y%m%d')}" for _ in range(num_records)],
             'id': trade_records['id'],
             'tradeId': trade_records['tradeId'],
@@ -598,16 +599,75 @@ class Instrument(BaseModel):
         client.insert_arrow(f"{database}.{table_name}", df)
 
 
+class HmsBook(BaseModel):
+    name: str
+    desk: str
+    updatedAt: datetime
+
+    @classmethod
+    def create_clickhouse_table(cls, client: Client, table_name: str='hmsbook_f', database: str = "default", 
+                              drop_existing: bool = True, order_by: tuple = ("name",)) -> None:
+        if drop_existing:
+            drop_table_query = f"DROP TABLE IF EXISTS {database}.{table_name}"
+            client.command(drop_table_query)
+        
+        field_definitions = []
+        for field_name, field in cls.model_fields.items():
+            field_type = field.annotation
+            clickhouse_type = get_clickhouse_type(field_type)
+            field_definitions.append(f"{field_name} {clickhouse_type}")
+        
+        fields_sql = ",\n    ".join(field_definitions)
+        order_by_clause = ", ".join(order_by)
+        
+        create_table_query = f"""
+        CREATE TABLE IF NOT EXISTS {database}.{table_name} (
+            {fields_sql}
+        ) ENGINE = ReplacingMergeTree(updatedAt)
+        ORDER BY ({order_by_clause});
+        """
+        
+        client.command(create_table_query)
+
+    @classmethod
+    def generate_random_books_df(cls, num_records: int = 10) -> pl.DataFrame:
+        fake = Faker()
+        now = datetime.now()
+        
+        # Define realistic values for desks
+        desks = ['EQUITY', 'FIXED_INCOME', 'FX', 'COMMODITIES', 'RATES']
+        
+        data = {
+            'name': [f"BOOK_{fake.unique.random_number(digits=6)}" for _ in range(num_records)],
+            'desk': [random.choice(desks) for _ in range(num_records)],
+            'updatedAt': [now - timedelta(minutes=random.randint(0, 60)) for _ in range(num_records)]
+        }
+        
+        schema = {field_name: get_polars_type(field.annotation) 
+                 for field_name, field in cls.model_fields.items()}
+        return pl.DataFrame(data, schema=schema, strict=False)
+
+    @classmethod
+    def save_to_clickhouse(cls, df: pl.DataFrame, client: Client, table_name: str='hmsbook_f', 
+                          database: str = "default") -> None:
+        df = df.to_arrow()
+        client.insert_arrow(f"{database}.{table_name}", df)
+
 # Example usage:
 if __name__ == "__main__":
     client = get_client(host='localhost', port=8123, username='default', password='')
     
     # Create tables first
-    Trade.create_clickhouse_table(client, drop_existing=False)
-    Risk.create_clickhouse_table(client, drop_existing=False)
-    Counterparty.create_clickhouse_table(client, drop_existing=False)
-    Instrument.create_clickhouse_table(client, drop_existing=False)
-   
+    Trade.create_clickhouse_table(client, drop_existing=True)
+    Risk.create_clickhouse_table(client, drop_existing=True)    
+    Counterparty.create_clickhouse_table(client, drop_existing=True)
+    Instrument.create_clickhouse_table(client, drop_existing=True)
+    HmsBook.create_clickhouse_table(client, drop_existing=True)
+
+    
+    books_df = HmsBook.generate_random_books_df(10)
+    HmsBook.save_to_clickhouse(books_df, client)
+
     # Generate reference data
     counterparty_df = Counterparty.generate_random_counterparties_df(10)
     Counterparty.save_to_clickhouse(counterparty_df, client)
@@ -616,8 +676,9 @@ if __name__ == "__main__":
     Instrument.save_to_clickhouse(instrument_df, client)
 
     # Generate trades using the reference data directly
-    trades_df = Trade.generate_random_trades_df(100, counterparty_df, instrument_df)
+    trades_df = Trade.generate_random_trades_df(100, counterparty_df, instrument_df, books_df)
     Trade.save_to_clickhouse(trades_df, client)
     
     risks_df = Risk.generate_random_risks_from_trades_df(trades_df)
     Risk.save_to_clickhouse(risks_df, client)
+
