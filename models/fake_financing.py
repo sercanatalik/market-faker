@@ -80,6 +80,7 @@ class Trade(BaseModel):
     status: Optional[str] = None
     pts: Optional[str] = None
     hmsBook: Optional[str] = None
+    portfolio: Optional[str] = None
     productType: Optional[str] = None
     productSubType: Optional[str] = None
     tradeDt: Optional[date] = None
@@ -189,7 +190,7 @@ class Trade(BaseModel):
         collat_types = ['EURABS', 'USABS', 'GOVTBOND']
         funding_leg_types = ['fixedRate', 'floatingRate']
         fx_pairs = ['USDEUR', 'USDJPY', 'EURGBP', 'EURUSD']
-        
+        portfolios = ['PORT_1', 'PORT_2', 'PORT_3', 'PORT_4']
         base_date = date.today()
         
         # Initialize lists for each column
@@ -212,6 +213,7 @@ class Trade(BaseModel):
             'executionDt': [],
             'counterParty': [],
             'treatsCode': [],
+            'portfolio': [],
             'traderName': [],
             'projectName': [],
             'qmlError': [],
@@ -262,7 +264,7 @@ class Trade(BaseModel):
             data['maturityDt'].append(maturity_date.strftime('%Y-%m-%d'))
             data['maturityIsOpen'].append(str(random.choice([True, False])).lower())
             data['executionDt'].append(execution_time.strftime('%Y-%m-%d %H:%M:%S'))
-            
+            data['portfolio'].append(random.choice(portfolios))
             # Select random instrument
             collat_id, collat_desc = random.choice(instrument_pairs)
             
@@ -303,6 +305,240 @@ class Trade(BaseModel):
         df = df.to_arrow()
         client.insert_arrow(f"{database}.{table_name}", df)
 
+class PnLEod(BaseModel):
+    id: str
+    asOfDate: datetime
+    updatedAt: datetime
+    bu: Optional[str] = None
+    sbu: Optional[str] = None
+    portfolio: Optional[str] = None
+    book: str
+    YTD: Optional[float] = None
+    MTD: Optional[float] = None
+    DTD: Optional[float] = None
+    AOP: Optional[float] = None
+    PPNL: Optional[float] = None
+    calculatedAt: datetime
+
+    @classmethod
+    def create_clickhouse_table(cls, client: Client, table_name: str = 'pnl_eod', database: str = "default",
+                                drop_existing: bool = True,
+                                order_by: tuple = ("asOfDate", "id")) -> None:
+        """
+        Dynamically creates a ClickHouse table based on the Pydantic model fields.
+
+        Args:
+            client: ClickHouse client instance
+            table_name: Name of the table to create
+            database: Database name (defaults to 'default')
+            order_by: Tuple of field names to use for ordering (defaults to ("asOfDate", "id"))
+        """
+        # First drop the existing table if it exists
+        if drop_existing:
+            drop_table_query = f"DROP TABLE IF EXISTS {database}.{table_name}"
+            client.command(drop_table_query)
+
+        # Get model fields and their types
+        field_definitions = []
+        for field_name, field in cls.model_fields.items():
+            # Get the field type
+            field_type = field.annotation
+            clickhouse_type = get_clickhouse_type(field_type)
+            print(field_type, clickhouse_type)
+            field_definitions.append(f"{field_name} {clickhouse_type}")
+
+        # Join field definitions with commas
+        fields_sql = ",\n    ".join(field_definitions)
+
+        # Create the ORDER BY clause
+        order_by_clause = ", ".join(order_by)
+
+        # Construct the complete CREATE TABLE query
+        create_table_query = f"""
+            CREATE TABLE IF NOT EXISTS {database}.{table_name} (
+                {fields_sql}
+            ) ENGINE = ReplacingMergeTree(calculatedAt)
+            ORDER BY ({order_by_clause});
+            """
+
+        client.command(create_table_query)
+
+    @classmethod
+    def generate_random_pnl_eod_df(cls, trades_df: pl.DataFrame) -> pl.DataFrame:
+        """
+        Generates random risk records based on existing trades.
+        """
+        fake = Faker()
+        
+        # Get unique portfolios and books from trades
+        unique_books = trades_df['hmsBook'].unique().to_list()
+        num_records = len(unique_books)
+        base_date = date.today()
+
+        data = {
+            'id': [str(fake.uuid4()) for _ in range(num_records)],
+            'asOfDate': [datetime.combine(base_date, datetime.min.time()) for _ in range(num_records)],
+            'updatedAt': [datetime.now() - timedelta(minutes=random.randint(0, 60)) for _ in range(num_records)],
+            'bu': [random.choice(['Structured Index Products', 'Cash Financing Sol', 'Structured Commodity Products']) for _ in range(num_records)],
+            'sbu': [random.choice(['RATES', 'CREDIT', 'FX_SPOT', 'FX_FWD']) for _ in range(num_records)],
+            'portfolio': [f"PORT_{fake.random_number(digits=4)}" for _ in range(num_records)],
+            'book': unique_books,
+            'YTD': [float(round(random.uniform(100000, 1000000), 2)) for _ in range(num_records)],
+            'MTD': [float(round(random.uniform(10000, 100000), 2)) for _ in range(num_records)],
+            'DTD': [float(round(random.uniform(1000, 10000), 2)) for _ in range(num_records)],
+            'AOP': [float(round(random.uniform(800000, 8000000), 2)) for _ in range(num_records)],  # Close to PPNL range
+            'PPNL': [float(round(random.uniform(1000000, 10000000), 2)) for _ in range(num_records)],  # 10x bigger than YTD
+            'calculatedAt': [datetime.now() - timedelta(minutes=random.randint(0, 60)) for _ in range(num_records)]
+        }
+
+        schema = {field_name: get_polars_type(field.annotation) 
+                 for field_name, field in cls.model_fields.items()}
+        return pl.DataFrame(data, schema=schema, strict=False)
+
+    @classmethod
+    def save_to_clickhouse(cls, df: pl.DataFrame, client: Client, table_name: str = 'pnl_eod',
+                           database: str = "default") -> None:
+        df = df.to_arrow()
+        client.insert_arrow(f"{database}.{table_name}", df)
+
+
+class RiskMV(BaseModel):
+    id: str
+    asOfDate: datetime
+    updatedAt: datetime
+    bu: Optional[str] = None
+    sbu: Optional[str] = None
+    portfolio: Optional[str] = None
+    book: str
+    tradeId: Optional[str] = None
+    ccy: Optional[str] = None
+    tradeCcy: Optional[str] = None
+    instrument: Optional[str] = None
+    tradeStatus: Optional[int] = None
+    version: Optional[float] = None
+    cashOut: Optional[float] = None
+    projectedCashOut: Optional[float] = None
+    realisedCashOut: Optional[float] = None
+    notional: Optional[float] = None
+    vcProduct: Optional[str] = None
+    vcProductGroup: Optional[str] = None
+
+    counterparty: Optional[str] = None
+    obligor: Optional[str] = None
+    tradeDate: Optional[date] = None
+    startDate: Optional[date] = None
+    maturityDate: Optional[date] = None
+    underlyingCcy: Optional[float] = None
+    underlyingAmount: Optional[str] = None
+    calculatedAt: datetime
+
+    @classmethod
+    def create_clickhouse_table(cls, client: Client, table_name: str = 'risk_f_mv', database: str = "default",
+                                drop_existing: bool = True,
+                                order_by: tuple = ("asOfDate", "id")) -> None:
+        """
+        Dynamically creates a ClickHouse table based on the Pydantic model fields.
+
+        Args:
+            client: ClickHouse client instance
+            table_name: Name of the table to create
+            database: Database name (defaults to 'default')
+            order_by: Tuple of field names to use for ordering (defaults to ("asOfDate", "id"))
+        """
+        # First drop the existing table if it exists
+        if drop_existing:
+            drop_table_query = f"DROP TABLE IF EXISTS {database}.{table_name}"
+            client.command(drop_table_query)
+
+        # Get model fields and their types
+        field_definitions = []
+        for field_name, field in cls.model_fields.items():
+            # Get the field type
+            field_type = field.annotation
+            clickhouse_type = get_clickhouse_type(field_type)
+            print(field_type, clickhouse_type)
+            field_definitions.append(f"{field_name} {clickhouse_type}")
+
+        # Join field definitions with commas
+        fields_sql = ",\n    ".join(field_definitions)
+
+        # Create the ORDER BY clause
+        order_by_clause = ", ".join(order_by)
+
+        # Construct the complete CREATE TABLE query
+        create_table_query = f"""
+            CREATE TABLE IF NOT EXISTS {database}.{table_name} (
+                {fields_sql}
+            ) ENGINE = ReplacingMergeTree(calculatedAt)
+            ORDER BY ({order_by_clause});
+            """
+
+        client.command(create_table_query)
+
+    @classmethod
+    def generate_random_risks_from_trades_df(cls, trades_df: pl.DataFrame, num_risks_per_trade: int = 1) -> pl.DataFrame:
+        """
+        Generates random risk records based on existing trades.
+        """
+        fake = Faker()
+        
+        # Get the base trade records
+        trade_records = trades_df.select([
+            'id', 'tradeId', 'counterParty', 'hmsBook'
+        ])
+        
+        # Repeat the trade records
+        trade_records = pl.concat([trade_records] * num_risks_per_trade, how="vertical")
+        
+        num_records = len(trade_records)
+        base_date = date.today()
+
+        # Define realistic values for specific fields
+        bus = ['Structured Index Products', 'Cash Financing Sol', 'Structured Commodity Products', 'Structured Equity Products']
+        sbus = ['RATES', 'CREDIT', 'FX_SPOT', 'FX_FWD']
+        currencies = ['USD', 'EUR', 'GBP', 'JPY']
+        vc_products = ['BOND', 'SWAP', 'FUTURE', 'OPTION']
+        vc_product_groups = ['RATES', 'CREDIT', 'FX', 'EQUITY']
+        
+        data = {
+            'id': [str(fake.uuid4()) for _ in range(num_records)],
+            'asOfDate': [datetime.combine(base_date, datetime.min.time()) for _ in range(num_records)],
+            'updatedAt': [datetime.now() - timedelta(minutes=random.randint(0, 60)) for _ in range(num_records)],
+            'bu': [random.choice(bus) for _ in range(num_records)],
+            'sbu': [random.choice(sbus) for _ in range(num_records)],
+            'portfolio': [f"PORT_{fake.random_number(digits=4)}" for _ in range(num_records)],
+            'book': trade_records['hmsBook'],
+            'tradeId': trade_records['tradeId'],
+            'ccy': [random.choice(currencies) for _ in range(num_records)],
+            'tradeCcy': [random.choice(currencies) for _ in range(num_records)],
+            'instrument': [f"INST_{fake.random_number(digits=6)}" for _ in range(num_records)],
+            'tradeStatus': [random.randint(0, 3) for _ in range(num_records)],
+            'version': [float(random.randint(1, 5)) for _ in range(num_records)],
+            'cashOut': [float(round(random.uniform(-1000000, 1000000), 2)) for _ in range(num_records)],
+            'projectedCashOut': [float(round(random.uniform(-1000000, 1000000), 2)) for _ in range(num_records)],
+            'realisedCashOut': [float(round(random.uniform(-1000000, 1000000), 2)) for _ in range(num_records)],
+            'notional': [float(round(random.uniform(1000000, 50000000), 2)) for _ in range(num_records)],
+            'vcProduct': [random.choice(vc_products) for _ in range(num_records)],
+            'vcProductGroup': [random.choice(vc_product_groups) for _ in range(num_records)],
+            'counterparty': trade_records['counterParty'],
+            'obligor': [f"OBL_{fake.random_number(digits=4)}" for _ in range(num_records)],
+            'tradeDate': [date.today() - timedelta(days=random.randint(0, 365)) for _ in range(num_records)],
+            'startDate': [date.today() - timedelta(days=random.randint(0, 365)) for _ in range(num_records)],
+            'maturityDate': [date.today() + timedelta(days=random.randint(30, 730)) for _ in range(num_records)],
+            'underlyingCcy': [float(round(random.uniform(1000000, 50000000), 2)) for _ in range(num_records)],
+            'underlyingAmount': [str(round(random.uniform(1000000, 50000000), 2)) for _ in range(num_records)],
+            'calculatedAt': [datetime.now() - timedelta(minutes=random.randint(0, 60)) for _ in range(num_records)]
+        }
+
+        schema = {field_name: get_polars_type(field.annotation) 
+                 for field_name, field in cls.model_fields.items()}
+        return pl.DataFrame(data, schema=schema, strict=False)
+
+    @classmethod
+    def save_to_clickhouse(cls, df: pl.DataFrame, client: Client, table_name: str = 'risk_f_mv',
+                           database: str = "default") -> None:
+        df = df.to_arrow()
+        client.insert_arrow(f"{database}.{table_name}", df)
 
 
 
@@ -338,6 +574,7 @@ class Risk(BaseModel):
     expectedMarginCall: Optional[float]
     financingExposure: Optional[float]
     calculatedAt: datetime
+    updatedAt: datetime
 
     @classmethod
     def create_clickhouse_table(cls, client: Client, table_name: str='risk_f', database: str = "default", drop_existing: bool = True,
@@ -409,7 +646,8 @@ class Risk(BaseModel):
             'counterParty': trade_records['counterParty'],
             'collatId': trade_records['collatId'],
             'collatDesc': trade_records['collatDesc'],
-            'collatConcentration': [float(round(random.uniform(0, 1), 4)) for _ in range(num_records)],  # Convert to float
+            'collatConcentration': [float(round(random.uniform(0, 1), 4)) for _ in range(num_records)],
+            # Convert to float
             'collatName': [f"Collateral_{i}" for i in range(num_records)],
             'collatTicker': [f"TICK_{fake.random_number(digits=4)}" for _ in range(num_records)],
             'collatIssuer': [f"ISSUER_{fake.random_number(digits=4)}" for _ in range(num_records)],
@@ -418,7 +656,8 @@ class Risk(BaseModel):
             'age': [f"{random.randint(1, 100)}D" for _ in range(num_records)],
             'tenor': [f"{random.randint(1, 10)}Y" for _ in range(num_records)],
             'fxSpot': [float(round(random.uniform(0.8, 1.2), 6)) for _ in range(num_records)],  # Convert to float
-            'fxSpotFunding': [float(round(random.uniform(0.8, 1.2), 6)) for _ in range(num_records)],  # Convert to float
+            'fxSpotFunding': [float(round(random.uniform(0.8, 1.2), 6)) for _ in range(num_records)],
+            # Convert to float
             'fxSpotEOD': [float(round(random.uniform(0.8, 1.2), 6)) for _ in range(num_records)],  # Convert to float
             'fundingAmount': [Decimal(str(round(random.uniform(1000000, 50000000), 2))) for _ in range(num_records)],
             'collateralAmount': [Decimal(str(round(random.uniform(1000000, 50000000), 2))) for _ in range(num_records)],
@@ -431,7 +670,8 @@ class Risk(BaseModel):
             'realizedMarginCall': [float(round(random.uniform(-100000, 100000), 2)) for _ in range(num_records)],  # Convert to float
             'expectedMarginCall': [float(round(random.uniform(-100000, 100000), 2)) for _ in range(num_records)],  # Convert to float
             'financingExposure': [float(round(random.uniform(-1000000, 1000000), 2)) for _ in range(num_records)],  # Convert to float
-            'calculatedAt': [base_date - timedelta(minutes=random.randint(0, 60)) for _ in range(num_records)]
+            'calculatedAt': [base_date - timedelta(minutes=random.randint(0, 60)) for _ in range(num_records)],
+            'updatedAt': [datetime.now() - timedelta(minutes=random.randint(0, 60)) for _ in range(num_records)]
         }
         
         schema = {field_name: get_polars_type(field.annotation) 
@@ -663,7 +903,8 @@ if __name__ == "__main__":
     Counterparty.create_clickhouse_table(client, drop_existing=True)
     Instrument.create_clickhouse_table(client, drop_existing=True)
     HmsBook.create_clickhouse_table(client, drop_existing=True)
-
+    RiskMV.create_clickhouse_table(client,drop_existing=True)
+    PnLEod.create_clickhouse_table(client,drop_existing=True)
     
     books_df = HmsBook.generate_random_books_df(10)
     HmsBook.save_to_clickhouse(books_df, client)
@@ -679,6 +920,14 @@ if __name__ == "__main__":
     trades_df = Trade.generate_random_trades_df(100, counterparty_df, instrument_df, books_df)
     Trade.save_to_clickhouse(trades_df, client)
     
-    risks_df = Risk.generate_random_risks_from_trades_df(trades_df)
-    Risk.save_to_clickhouse(risks_df, client)
 
+
+    risk_mv = RiskMV.generate_random_risks_from_trades_df(trades_df)
+    RiskMV.save_to_clickhouse(risk_mv, client)
+
+
+    pnl_eod = PnLEod.generate_random_pnl_eod_df(trades_df)
+    PnLEod.save_to_clickhouse(pnl_eod, client)
+
+
+    print("Done")
